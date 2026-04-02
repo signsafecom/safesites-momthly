@@ -28,8 +28,8 @@ export default function DashboardPage() {
 
   useEffect(() => {
     Promise.all([
-      documentsApi.list().then((r) => setDocuments(r.data.documents.slice(0, 5))),
-      subscriptionApi.status().then((r) => setSubscription(r.data)),
+      documentsApi.list().then((r) => setDocuments(r.data?.documents?.slice(0, 5) ?? [])).catch(() => {}),
+      subscriptionApi.status().then((r) => setSubscription(r.data)).catch(() => {}),
     ]).finally(() => setLoading(false));
   }, []);
 
