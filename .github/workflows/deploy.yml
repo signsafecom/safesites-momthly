@@ -1,4 +1,4 @@
-name: Deploy to AWS
+aws-region: us-east-1name: Deploy to AWS
 
 on:
   push:
