@@ -27,8 +27,8 @@ export default function BillingPage() {
 
   useEffect(() => {
     Promise.all([
-      subscriptionApi.status().then((r) => setSubscription(r.data)),
-      subscriptionApi.invoices().then((r) => setPayments(r.data.payments)),
+      subscriptionApi.status().then((r) => setSubscription(r.data)).catch(() => {}),
+      subscriptionApi.invoices().then((r) => setPayments(r.data.payments ?? [])).catch(() => {}),
     ]).finally(() => setLoading(false));
   }, []);
 

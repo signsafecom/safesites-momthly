@@ -20,7 +20,7 @@ export default function DocumentsPage() {
   const loadDocuments = async () => {
     try {
       const { data } = await documentsApi.list();
-      setDocuments(data.documents);
+      setDocuments(data.documents ?? []);
     } catch {
       toast.error('Failed to load documents');
     } finally {
