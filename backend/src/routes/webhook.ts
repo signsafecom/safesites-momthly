@@ -2,10 +2,14 @@ import { Router, Request, Response, NextFunction } from 'express';
 import Stripe from 'stripe';
 import { prisma } from '../models/prisma';
 import { logger } from '../utils/logger';
+import { stripe, webhookSecret } from '../lib/stripe';
+import { Notifier } from '../notify/slack';
 
 export const webhookRouter = Router();
 
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || '', { apiVersion: '2024-06-20' });
+const notifier = new Notifier();
+const processedEvents = new Set<string>();
+const MAX_PROCESSED_EVENTS = 10_000;
 
 /**
  * @openapi
@@ -17,14 +21,25 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || '', { apiVersion: '20
 webhookRouter.post('/stripe', async (req: Request, res: Response, next: NextFunction) => {
   try {
     const sig = req.headers['stripe-signature'];
-    const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET!;
 
     let event: Stripe.Event;
     try {
-      event = stripe.webhooks.constructEvent(req.body, sig!, webhookSecret);
-    } catch {
+      event = stripe.webhooks.constructEvent(req.body, sig!, webhookSecret!);
+    } catch (err) {
+      await notifier.error('Webhook signature failed', err);
       res.status(400).json({ error: 'Webhook signature verification failed' });
       return;
+    }
+
+    if (event.id && processedEvents.has(event.id)) {
+      res.json({ received: true, duplicate: true });
+      return;
+    }
+    if (event.id) {
+      if (processedEvents.size >= MAX_PROCESSED_EVENTS) {
+        processedEvents.delete(processedEvents.values().next().value as string);
+      }
+      processedEvents.add(event.id);
     }
 
     switch (event.type) {
@@ -42,6 +57,7 @@ webhookRouter.post('/stripe', async (req: Request, res: Response, next: NextFunc
             },
           });
         }
+        await notifier.send(`🎉 Subscription activated: ${session.customer_email ?? session.customer}`);
         break;
       }
 
@@ -67,6 +83,7 @@ webhookRouter.post('/stripe', async (req: Request, res: Response, next: NextFunc
             data: { documentsThisMonth: 0, billingCycleStart: new Date() },
           });
         }
+        await notifier.paymentReceived(invoice.amount_paid, invoice.currency, invoice.customer);
         break;
       }
 
@@ -77,6 +94,7 @@ webhookRouter.post('/stripe', async (req: Request, res: Response, next: NextFunc
           where: { stripeCustomerId: customerId },
           data: { subscriptionStatus: 'PAST_DUE' },
         });
+        await notifier.error('Invoice payment failed', { customer: invoice.customer });
         break;
       }
 
@@ -86,6 +104,7 @@ webhookRouter.post('/stripe', async (req: Request, res: Response, next: NextFunc
           where: { subscriptionId: subscription.id },
           data: { subscriptionStatus: 'CANCELED' },
         });
+        await notifier.send(`🚫 Subscription cancelled: ${subscription.id}`);
         break;
       }
 
