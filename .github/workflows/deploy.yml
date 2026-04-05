@@ -1,79 +1,55 @@
-name: Deploy to AWS
+name: Deploy SignSafe
 
 on:
   push:
     branches: [main]
+  workflow_dispatch:
 
 jobs:
-  deploy-backend:
+  deploy:
     runs-on: ubuntu-latest
-    environment: production
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: us-east-1
-
-      - name: Login to Amazon ECR
-        id: login-ecr
-        uses: aws-actions/amazon-ecr-login@v2
-
-      - name: Build and push backend Docker image
-        env:
-          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-          ECR_REPOSITORY: safesites-backend
-          IMAGE_TAG: ${{ github.sha }}
-        run: |
-          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG ./backend
-          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
-          docker tag $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPOSITORY:latest
-          docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
-
-      - name: Deploy to EC2
-        uses: appleboy/ssh-action@v1.0.3
-        with:
-          host: ${{ secrets.EC2_HOST }}
-          username: ${{ secrets.EC2_USER }}
-          key: ${{ secrets.EC2_SSH_KEY }}
-          script: |
-            cd /opt/safesites
-            docker pull ${{ steps.login-ecr.outputs.registry }}/safesites-backend:latest
-            docker-compose up -d backend
-            docker-compose exec backend npx prisma migrate deploy
-
-  deploy-frontend:
-    runs-on: ubuntu-latest
-    environment: production
-    needs: deploy-backend
-    steps:
-      - uses: actions/checkout@v4
+      - name: Checkout SignSafe
+        uses: actions/checkout@v4
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '20'
+          cache: 'npm'
 
-      - name: Build frontend
-        run: |
-          npm ci
-          npm run build --workspace=web
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run compliance tests
+        run: npm run test:compliance
+
+      - name: Build application
+        run: npm run build
+
+      - name: Sync Stripe Products
         env:
-          REACT_APP_API_URL: ${{ secrets.PRODUCTION_API_URL }}
+          STRIPE_SECRET_KEY: ${{ secrets.STRIPE_SECRET_KEY }}
+        run: node scripts/sync-stripe.js
 
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
+      - name: Deploy to production
+        uses: appleboy/ssh-action@v1.0.3
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: us-east-1
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            cd /var/www/signsafe
+            git pull origin main
+            npm ci
+            docker-compose up -d ai-model
+            npm run build
+            pm2 restart signsafe || pm2 start dist/main.js --name signsafe
 
-      - name: Deploy to S3 + invalidate CloudFront
-        run: |
-          aws s3 sync web/build/ s3://${{ secrets.S3_FRONTEND_BUCKET }}/ --delete
-          aws cloudfront create-invalidation \
-            --distribution-id ${{ secrets.CLOUDFRONT_DISTRIBUTION_ID }} \
-            --paths "/*"
+      - name: Notify deployment
+        if: always()
+        uses: rtCamp/action-slack-notify@v2
+        env:
+          SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_MESSAGE: 'SignSafe ${{ job.status }}'
+          SLACK_COLOR: ${{ job.status }}
